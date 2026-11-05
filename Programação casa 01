@@ -1,0 +1,457 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+//=================================================
+// WIFI
+//=================================================
+
+const char* ssid = "virus";
+const char* password = "Duke1479*@";
+
+WebServer server(80);
+
+//=================================================
+// LCD
+//=================================================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+//=================================================
+// SEMAFORO RFID
+//=================================================
+
+#define LED_VERMELHO 15
+#define LED_AMARELO  2
+#define LED_VERDE    4
+
+//=================================================
+// RFID
+//=================================================
+
+#define SS_PIN   5
+#define RST_PIN 27
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+String cartaoAutorizado = "E0FD7B5F";
+
+//=================================================
+// SERVOS
+//=================================================
+
+Servo fechadura;
+Servo parede;
+Servo janela;
+
+#define SERVO_FECHADURA 33  // Fechadura no pino 32 (livre de conflito com o LCD)
+#define SERVO_PAREDE    32
+#define SERVO_JANELA    16
+
+bool portaAberta = false;
+unsigned long tempoPorta = 0;
+
+//=================================================
+// SENSOR CHUVA
+//=================================================
+
+#define SENSOR_CHUVA 17
+bool estadoChuvaAnterior = LOW;
+
+//=================================================
+// LDR
+//=================================================
+
+#define LDR_PIN 34
+bool luzLdrAtiva = false;
+
+//=================================================
+// ILUMINACAO E PINOS
+//=================================================
+
+#define SALA_PIN      14
+#define QUARTO_PIN    25
+#define COZINHA_PIN   26
+#define CORREDOR_PIN  13  // Nota: se usar o sensor de chuva no 33, mude o corredor para outro pino livre como o 12, mas aqui mantemos separados se necessário.
+#undef CORREDOR_PIN
+#define CORREDOR_PIN  2   // Vamos usar o 2 se estiver livre, ou manter 33 se tirar o sensor de chuva de lá. Vamos por segurança usar o 12 ou outro.
+// Para evitar qualquer conflito de pinos, vamos usar pinos garantidos:
+#undef CORREDOR_PIN
+#define CORREDOR_PIN  13 
+#undef JARDIM_PIN
+#define JARDIM_PIN    12
+
+bool paredeVertical = false; // Variável declarada corretamente aqui!
+
+//=================================================
+// LCD + MENSAGENS
+//=================================================
+
+void estadoTrancada()
+{
+  digitalWrite(LED_VERMELHO, HIGH);
+  digitalWrite(LED_AMARELO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("SMART HOME");
+  lcd.setCursor(0,1);
+  lcd.print("TRANCADA");
+}
+
+void estadoProcessando()
+{
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_AMARELO, HIGH);
+  digitalWrite(LED_VERDE, LOW);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("LENDO RFID");
+  lcd.setCursor(0,1);
+  lcd.print("AGUARDE");
+}
+
+void estadoLiberado()
+{
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_AMARELO, LOW);
+  digitalWrite(LED_VERDE, HIGH);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("ACESSO");
+  lcd.setCursor(0,1);
+  lcd.print("LIBERADO");
+}
+
+void estadoNegado()
+{
+  digitalWrite(LED_VERMELHO, HIGH);
+  digitalWrite(LED_AMARELO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("ACESSO");
+  lcd.setCursor(0,1);
+  lcd.print("NEGADO");
+}
+
+void mostrarAvisoLampada(String l1, String l2)
+{
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(l1);
+  lcd.setCursor(0,1);
+  lcd.print(l2);
+  delay(1500);
+  estadoTrancada();
+}
+
+//=================================================
+// PAGINA WEB
+//=================================================
+
+void voltarPagina()
+{
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void paginaPrincipal()
+{
+  Serial.println("[WEB] Alguém acessou a página principal.");
+  
+  String pagina = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{ font-family:Arial; text-align:center; background:#f4f4f4; margin-top:20px; }
+button{ width:180px; height:50px; margin:5px; font-size:16px; border-radius:5px; border:none; cursor:pointer; background:#007BFF; color:white; }
+button:hover{ background:#0056b3; }
+</style>
+</head>
+<body>
+<h1>CASA INTELIGENTE</h1>
+
+<h2>Iluminacao</h2>
+<a href="/salaon"><button>Ligar Sala</button></a>
+<a href="/salaoff"><button>Desligar Sala</button></a>
+<br>
+<a href="/quartoon"><button>Ligar Quarto</button></a>
+<a href="/quartooff"><button>Desligar Quarto</button></a>
+<br>
+<a href="/cozinhaon"><button>Ligar Cozinha</button></a>
+<a href="/cozinhaoff"><button>Desligar Cozinha</button></a>
+<br>
+<a href="/corredoron"><button>Ligar Corredor</button></a>
+<a href="/corredoroff"><button>Desligar Corredor</button></a>
+<br>
+<a href="/jardimon"><button>Ligar Jardim</button></a>
+<a href="/jardimoff"><button>Desligar Jardim</button></a>
+
+<h2>Parede Inteligente</h2>
+<a href="/horizontal"><button>Integrar</button></a>
+<a href="/vertical"><button>Dividir</button></a>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", pagina);
+}
+
+//=================================================
+// ILUMINACAO
+//=================================================
+
+void salaON(){ digitalWrite(SALA_PIN, HIGH); Serial.println("[WEB] Luz da SALA ligada."); mostrarAvisoLampada("SALA", "LIGADA"); voltarPagina(); }
+void salaOFF(){ digitalWrite(SALA_PIN, LOW); Serial.println("[WEB] Luz da SALA desligada."); mostrarAvisoLampada("SALA", "DESLIGADA"); voltarPagina(); }
+
+void quartoON(){ digitalWrite(QUARTO_PIN, HIGH); Serial.println("[WEB] Luz do QUARTO ligada."); mostrarAvisoLampada("QUARTO", "LIGADO"); voltarPagina(); }
+void quartoOFF(){ digitalWrite(QUARTO_PIN, LOW); Serial.println("[WEB] Luz do QUARTO desligada."); mostrarAvisoLampada("QUARTO", "DESLIGADO"); voltarPagina(); }
+
+void cozinhaON(){ digitalWrite(COZINHA_PIN, HIGH); Serial.println("[WEB] Luz da COZINHA ligada."); mostrarAvisoLampada("COZINHA", "LIGADA"); voltarPagina(); }
+void cozinhaOFF(){ digitalWrite(COZINHA_PIN, LOW); Serial.println("[WEB] Luz da COZINHA desligada."); mostrarAvisoLampada("COZINHA", "DESLIGADA"); voltarPagina(); }
+
+void corredorON(){ digitalWrite(CORREDOR_PIN, HIGH); Serial.println("[WEB] Luz do CORREDOR ligada."); mostrarAvisoLampada("CORREDOR", "LIGADO"); voltarPagina(); }
+void corredorOFF(){ digitalWrite(CORREDOR_PIN, LOW); Serial.println("[WEB] Luz do CORREDOR desligada."); mostrarAvisoLampada("CORREDOR", "DESLIGADO"); voltarPagina(); }
+
+void jardimON(){ digitalWrite(JARDIM_PIN, HIGH); Serial.println("[WEB] Luz do JARDIM ligada."); mostrarAvisoLampada("JARDIM", "LIGADO"); voltarPagina(); }
+void jardimOFF(){ digitalWrite(JARDIM_PIN, LOW); Serial.println("[WEB] Luz do JARDIM desligada."); mostrarAvisoLampada("JARDIM", "DESLIGADO"); voltarPagina(); }
+
+//=================================================
+// PAREDE
+//=================================================
+
+void paredeHorizontal()
+{
+  parede.write(0);
+  paredeVertical = false;
+  Serial.println("[WEB] Parede Inteligente: INTEGRADA.");
+  mostrarAvisoLampada("PAREDE", "INTEGRADA");
+  voltarPagina();
+}
+
+void paredeVerticalFunc()
+{
+  parede.write(90);
+  paredeVertical = true;
+  Serial.println("[WEB] Parede Inteligente: DIVIDIDA.");
+  mostrarAvisoLampada("PAREDE", "DIVIDIDA");
+  voltarPagina();
+}
+
+//=================================================
+// RFID
+//=================================================
+
+void verificarRFID()
+{
+  if (!rfid.PICC_IsNewCardPresent())
+    return;
+
+  if (!rfid.PICC_ReadCardSerial())
+    return;
+
+  estadoProcessando();
+
+  String uid = "";
+  for(byte i=0; i<rfid.uid.size; i++)
+  {
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+  uid.toUpperCase();
+
+  Serial.print("[RFID] Cartão detectado. UID: ");
+  Serial.println(uid);
+
+  delay(1000);
+
+  if(uid == cartaoAutorizado)
+  {
+    estadoLiberado();
+    fechadura.write(90);
+    portaAberta = true;
+    tempoPorta = millis();
+    Serial.println("[RFID] Acesso LIBERADO!");
+  }
+  else
+  {
+    estadoNegado();
+    Serial.println("[RFID] Acesso NEGADO!");
+    delay(3000);
+    estadoTrancada();
+  }
+
+  rfid.PICC_HaltA();
+}
+
+//=================================================
+// FECHADURA
+//=================================================
+
+void controlarFechadura()
+{
+  if(portaAberta)
+  {
+    if(millis() - tempoPorta >= 5000)
+    {
+      fechadura.write(0);
+      portaAberta = false;
+      estadoTrancada();
+      Serial.println("[FECHADURA] Trancada automaticamente.");
+    }
+  }
+}
+
+//=================================================
+// JANELA
+//=================================================
+
+void controlarJanela()
+{
+  int chuva = digitalRead(SENSOR_CHUVA);
+
+  if(chuva != estadoChuvaAnterior)
+  {
+    estadoChuvaAnterior = chuva;
+    if(chuva == HIGH)
+    {
+      janela.write(90);
+      Serial.println("[CHUVA] Sensor detectou CHUVA! Janela fechada.");
+      mostrarAvisoLampada("CHUVA DETECTADA", "JANELA FECHADA");
+    }
+    else
+    {
+      janela.write(0);
+      Serial.println("[CHUVA] Parou de chover. Janela aberta.");
+      mostrarAvisoLampada("TEMPO FIRME", "JANELA ABERTA");
+    }
+  }
+}
+
+//=================================================
+// LDR
+//=================================================
+
+void controlarLDR()
+{
+  int leitura = analogRead(LDR_PIN);
+
+  if(leitura < 1500 && !luzLdrAtiva)
+  {
+    digitalWrite(CORREDOR_PIN, HIGH);
+    digitalWrite(JARDIM_PIN, HIGH);
+    luzLdrAtiva = true;
+    Serial.print("[LDR] Escuro. Ligando luzes (Leitura: ");
+    Serial.print(leitura);
+    Serial.println(").");
+    mostrarAvisoLampada("MODO NOITE", "LUZES ATIVADAS");
+  }
+  else if(leitura >= 1500 && luzLdrAtiva)
+  {
+    luzLdrAtiva = false;
+    Serial.print("[LDR] Claro (Leitura: ");
+    Serial.print(leitura);
+    Serial.println(").");
+  }
+}
+
+//=================================================
+// SETUP
+//=================================================
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n[SISTEMA] Iniciando ESP32 Smart Home...");
+
+  pinMode(SALA_PIN, OUTPUT);
+  pinMode(QUARTO_PIN, OUTPUT);
+  pinMode(COZINHA_PIN, OUTPUT);
+  pinMode(CORREDOR_PIN, OUTPUT);
+  pinMode(JARDIM_PIN, OUTPUT);
+
+  pinMode(SENSOR_CHUVA, INPUT);
+
+  pinMode(LED_VERMELHO, OUTPUT);
+  pinMode(LED_AMARELO, OUTPUT);
+  pinMode(LED_VERDE, OUTPUT);
+
+  lcd.init();
+  lcd.backlight();
+
+  estadoTrancada();
+
+  fechadura.attach(SERVO_FECHADURA);
+  parede.attach(SERVO_PAREDE);
+  janela.attach(SERVO_JANELA);
+
+  fechadura.write(0);
+  parede.write(0);
+  janela.write(0);
+
+  SPI.begin();
+  rfid.PCD_Init();
+
+  Serial.print("[WIFI] Conectando à rede: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while(WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("[WIFI] Conectado com sucesso!");
+  Serial.print("[WIFI] Endereço IP do Servidor Web: http://");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", paginaPrincipal);
+
+  server.on("/salaon", salaON);
+  server.on("/salaoff", salaOFF);
+
+  server.on("/quartoon", quartoON);
+  server.on("/quartooff", quartoOFF);
+
+  server.on("/cozinhaon", cozinhaON);
+  server.on("/cozinhaoff", cozinhaOFF);
+
+  server.on("/corredoron", corredorON);
+  server.on("/corredoroff", corredorOFF);
+
+  server.on("/jardimon", jardimON);
+  server.on("/jardimoff", jardimOFF);
+
+  server.on("/horizontal", paredeHorizontal);
+  server.on("/vertical", paredeVerticalFunc);
+
+  server.begin();
+  Serial.println("[WEB] Servidor Web iniciado na porta 80!");
+}
+
+//=================================================
+// LOOP
+//=================================================
+
+void loop()
+{
+  server.handleClient();
+  verificarRFID();
+  controlarFechadura();
+  controlarJanela();
+  controlarLDR();
+}
