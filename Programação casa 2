@@ -1,0 +1,75 @@
+// Definição dos pinos
+const int pinoSensorChuva = A0; // Pino analógico do sensor de chuva
+const int pinoReléSentido = 7;  // Relé 1: Inverte o sentido de rotação
+const int pinoReléMotor = 8;    // Relé 2: Liga/Desliga a alimentação do motor
+
+// Limiar de umidade (ajuste conforme os testes do seu sensor)
+// Valores menores que 500 indicam presença de água/chuva intensa
+const int limiarChuva = 500; 
+
+// Tempo em milissegundos que o motor fica ligado para abrir ou fechar a janela
+const unsigned long tempoMovimento = 5000; // Exemplo: 5 segundos
+
+bool janelaAberta = false; // Estado atual da janela (false = fechada, true = aberta)
+
+void setup() {
+  Serial.begin(9600);
+  
+  pinMode(pinoReléSentido, OUTPUT);
+  pinMode(pinoReléMotor, OUTPUT);
+  
+  // Estado inicial: relés desligados (motor parado)
+  digitalWrite(pinoReléSentido, HIGH); // HIGH ou LOW dependendo do seu módulo relé
+  digitalWrite(pinoReléMotor, HIGH);   // Usando lógica comum (relé desligado em HIGH)
+  
+  Serial.println("Sistema de Janela Automática Iniciado.");
+}
+
+void loop() {
+  int leituraUmidade = analogRead(pinoSensorChuva);
+  
+  // Exibe a leitura no Monitor Serial para calibração
+  Serial.print("Leitura do Sensor: ");
+  Serial.println(leituraUmidade);
+  
+  // Se começou a chover (leitura abaixo do limiar) e a janela estiver aberta
+  if (leituraUmidade < limiarChuva && janelaAberta) {
+    Serial.println("Chuva detectada! Fechando a janela...");
+    fecharJanela();
+    janelaAberta = false;
+  }
+  
+  // Se parou de chuva (leitura acima do limiar) e a janela estiver fechada
+  // (Opcional: comente este bloco se quiser que a janela abra apenas manualmente)
+  else if (leituraUmidade >= limiarChuva && !janelaAberta) {
+    Serial.println("Tempo limpo. Abrindo a janela...");
+    abrirJanela();
+    janelaAberta = true;
+  }
+  
+  delay(2000); // Aguarda 2 segundos entre as leituras para evitar leituras instáveis
+}
+
+// Função para girar o motor em um sentido (Abrir)
+void abrirJanela() {
+  digitalWrite(pinoReléSentido, LOW);  // Define o sentido de abertura
+  delay(100);                          // Pequeno delay para estabilizar o relé
+  digitalWrite(pinoReléMotor, LOW);    // Liga o motor
+  
+  delay(tempoMovimento);               // Mantém o motor ligado pelo tempo necessário
+  
+  digitalWrite(pinoReléMotor, HIGH);   // Desliga o motor
+  Serial.println("Janela aberta.");
+}
+
+// Função para girar o motor no sentido inverso (Fechar)
+void fecharJanela() {
+  digitalWrite(pinoReléSentido, HIGH); // Inverte o sentido (fechamento)
+  delay(100);                          // Pequeno delay para estabilizar o relé
+  digitalWrite(pinoReléMotor, LOW);    // Liga o motor
+  
+  delay(tempoMovimento);               // Mantém o motor ligado pelo tempo necessário
+  
+  digitalWrite(pinoReléMotor, HIGH);   // Desliga o motor
+  Serial.println("Janela fechada.");
+}
